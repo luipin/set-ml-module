@@ -11,8 +11,8 @@ class AddRandomBackground(A.ImageOnlyTransform):
     Custom transform that replaces black/dark padding (introduced by rotation/scaling) 
     and the dark corners of the raw seed images with random colors, noise, or real textures.
     """
-    def __init__(self, bg_dir=None, always_apply=False, p=0.5):
-        super(AddRandomBackground, self).__init__(always_apply, p)
+    def __init__(self, bg_dir=None, p=0.5):
+        super().__init__(p=p)
         self.bg_dir = bg_dir
         self.bg_images = []
         if self.bg_dir and os.path.exists(self.bg_dir):
