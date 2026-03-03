@@ -83,6 +83,10 @@ def get_train_transforms():
     """
     Returns the full Albumentations pipeline for training data, including ImageNet Normalization.
 
+    Resize comes first to ensure all images are 224x224 before augmentation. ResNet18
+    requires this exact input size. Resizing before spatial transforms (not after) means
+    ShiftScaleRotate and friends always operate at the target resolution.
+
     The normalization constants [0.485, 0.456, 0.406] and [0.229, 0.224, 0.225] are standard
     for models pre-trained on ImageNet (like our ResNet18 backbone).
 
@@ -90,6 +94,7 @@ def get_train_transforms():
         albumentations.Compose: The full training transformation pipeline.
     """
     return A.Compose([
+        A.Resize(224, 224),
         get_spatial_color_transforms(),
         A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ToTensorV2()
@@ -99,13 +104,15 @@ def get_val_transforms():
     """
     Returns Albumentations pipeline for validation/test data.
 
-    Only includes normalization and tensor conversion. No spatial or color augmentations
-    are applied to ensure we evaluate the model on 'clean' (albeit normalized) data.
+    Only includes resize, normalization, and tensor conversion. No spatial or color
+    augmentations are applied to ensure we evaluate the model on 'clean' (albeit
+    normalized) data.
 
     Returns:
         albumentations.Compose: The validation transformation pipeline.
     """
     return A.Compose([
+        A.Resize(224, 224),
         A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ToTensorV2()
     ])
