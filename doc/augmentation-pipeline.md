@@ -264,25 +264,173 @@ flowchart LR
 
 ## 6. End-to-end data flow during training
 
-This ties everything together — what happens from raw image file to model input:
+This section walks through the complete chain — from calling `Trainer.fit()` all the way to a batch arriving at the model — explaining every layer of the machinery.
+
+---
+
+### 6.1 The four-layer stack
+
+There are four components working together. Understanding who calls whom is essential before reading any of the code.
 
 ```mermaid
 flowchart TD
-    FILE["data/augmented/red_diamond_1_solid_aug_0042.jpg\nStored on disk"]
+    LT["PyTorch Lightning Trainer\nTrainer.fit(model, datamodule)\n\nOrchestrates the training loop.\nCalls datamodule.setup(), then\nasks for dataloaders each epoch."]
 
-    FILE --> CV2["cv2.imread()\nLoads as BGR numpy array"]
-    CV2 --> RGB["cv2.cvtColor BGR→RGB\nAlbumentations expects RGB"]
-    RGB --> PARSE["Parse filename\nred → 0, diamond → 0, 1 → 0, solid → 0\nLabels become torch.long tensors"]
-    RGB --> AUG["get_train_transforms()(image=array)\n\n1. ShiftScaleRotate (p=0.7)\n2. AddRandomBackground (p=1.0)\n3. RandomBrightnessContrast (p=0.7)\n4. HueSaturationValue (p=0.7)\n5. GaussianBlur (p=0.3)\n6. Normalize (always)\n7. ToTensorV2 (always)"]
+    LT --> DM["SetCardDataModule\nset_card_data_pipeline.py:97\n\nResponsible for:\n- Finding image files on disk\n- Splitting into train/val\n- Creating Dataset objects\n- Returning DataLoaders"]
 
-    AUG --> TENSOR["torch.Tensor (3×H×W)\nfloat32, ImageNet-normalized"]
-    PARSE --> LABELS["labels dict\n{ color: tensor(0),\n  shape: tensor(0),\n  number: tensor(0),\n  shading: tensor(0) }"]
+    DM --> DL["PyTorch DataLoader\n(one for train, one for val)\n\nResponsible for:\n- Shuffling (train only)\n- Fetching samples in parallel\n- Grouping samples into batches\n- Calling __getitem__ repeatedly"]
 
-    TENSOR --> BATCH["DataLoader collects 32 samples into a batch"]
-    LABELS --> BATCH
+    DL --> DS["SetCardDataset\nset_card_data_pipeline.py:19\n\nResponsible for:\n- Loading one image from disk\n- Parsing its label from filename\n- Running the augmentation transform\n- Returning (tensor, labels_dict)"]
+```
 
-    BATCH --> MODEL["ResNet18 MultiHead Model\nInput: (32, 3, H, W)"]
-    MODEL --> OUT["Output dict\n{ color: (32,3), shape: (32,3),\n  number: (32,3), shading: (32,3) }"]
+The DataLoader is the engine that drives the Dataset. It calls `__getitem__` on the Dataset repeatedly, collects the results, and stacks them into batches. The Trainer drives the DataLoader — it asks for the next batch, passes it to the model, computes the loss, and updates the weights.
+
+---
+
+### 6.2 `SetCardDataModule.setup()` — what runs before training starts
+
+`setup()` is called once by the Trainer before the first epoch. It does three things:
+
+```mermaid
+flowchart TD
+    SETUP["DataModule.setup()\nset_card_data_pipeline.py:120"]
+
+    SETUP --> GLOB["Step 1: File discovery\nglob('data/augmented/*.jpg')\nglob('data/augmented/*.png')\n\nBuilds a flat list of every\nimage path in the directory.\nRaises FileNotFoundError if empty."]
+
+    GLOB --> SPLIT["Step 2: 80/20 train/val split\ntrain_test_split(all_images, test_size=0.2, random_state=42)\n\nScikit-learn shuffles the list\nand cuts it: 80% train, 20% val.\nrandom_state=42 makes the split\nreproducible — same split every run."]
+
+    SPLIT --> MULT["Step 3: Dynamic multiplier\ntrain_paths = train_paths * dynamic_multiplier\n\nPython list multiplication: repeats the\nlist N times. If multiplier=300 and\nyou have 65 train images:\n65 × 300 = 19,500 paths in the list.\nSame 65 files, each listed 300 times."]
+
+    MULT --> DS1["SetCardDataset(train_paths, transform=get_train_transforms())\nDataset for training — with augmentation"]
+    SPLIT --> DS2["SetCardDataset(val_paths, transform=get_val_transforms())\nDataset for validation — normalize only"]
+```
+
+**The dynamic multiplier explained:**
+
+The multiplier is a trick for when you're training on the 81 raw seed images directly (not the bootstrapped augmented set). Without it, one epoch would be only 65 training steps (81 × 0.8 = 65 images). That's too short — the model barely sees anything before the epoch ends and validation runs.
+
+With `dynamic_multiplier=300`, the path list is `[img1, img2, ..., img65, img1, img2, ...]` — 300 repetitions. Each call to `__getitem__` loads the same file but runs a fresh random augmentation, producing a different image each time. So it's 19,500 iterations per epoch, each one a unique augmented view of the 65 training cards.
+
+When using the bootstrapped `data/augmented/` folder (~24,000 files), the multiplier should be left at `1` — there are already enough unique files.
+
+---
+
+### 6.3 The DataLoader — how batching works
+
+The DataLoader sits between the Dataset and the model. It controls how samples are fetched and assembled.
+
+```mermaid
+flowchart TD
+    DL["DataLoader\nbatch_size=32, shuffle=True, num_workers=4"]
+
+    DL --> SHUF["shuffle=True (training only)\n\nAt the start of each epoch, the DataLoader\nrandomizes the order of all image paths.\nThis prevents the model from memorizing\nthe sequence of cards."]
+
+    DL --> WORK["num_workers=4\n\nSpawns 4 parallel worker processes.\nEach worker calls __getitem__ independently.\nWhile the GPU is processing batch N,\nworkers are already loading batch N+1.\nWithout this, data loading would starve the GPU."]
+
+    DL --> FETCH["For each batch:\nCalls __getitem__(idx) 32 times\nfor 32 different indices"]
+
+    FETCH --> COLL["Collation (automatic)\n\nDataLoader stacks the 32 individual\nsamples into tensors:\n\n32 × (3,H,W) tensors → one (32,3,H,W) tensor\n32 × {color:scalar} dicts → {color:(32,)} tensor\n\nThis happens automatically via default_collate."]
+
+    COLL --> BATCH["One batch:\n  images: torch.Tensor (32, 3, H, W)\n  labels: {\n    'color':   torch.Tensor (32,)  ← 32 class indices\n    'shape':   torch.Tensor (32,)\n    'number':  torch.Tensor (32,)\n    'shading': torch.Tensor (32,)\n  }"]
+```
+
+**Why `shuffle=False` for validation?** Validation order doesn't affect the results (we're just measuring accuracy, not updating weights), and a fixed order makes runs reproducible and easier to debug.
+
+---
+
+### 6.4 `SetCardDataset.__getitem__` — what happens for a single sample
+
+This is the method the DataLoader calls 32 times to build one batch. Here is every line, explained:
+
+```mermaid
+flowchart TD
+    IDX["DataLoader requests index 42\n__getitem__(42)"]
+
+    IDX --> PATH["img_path = self.image_paths[42]\n→ 'data/augmented/red_diamond_1_solid_aug_0042.jpg'"]
+
+    PATH --> READ["cv2.imread(img_path)\n\nOpens the .jpg from disk.\nReturns a numpy array (H, W, 3), dtype=uint8.\n\nCRITICAL: OpenCV loads images in BGR order\n(Blue, Green, Red) — not the RGB order\nthat Albumentations and humans expect."]
+
+    READ --> CHECK["if image is None: raise ValueError\n\nOpenCV returns None (not an exception)\nif the file is missing or corrupted.\nWe check explicitly and raise a clear error."]
+
+    CHECK --> BGR2RGB["cv2.cvtColor(image, cv2.COLOR_BGR2RGB)\n\nSwaps channel order: BGR → RGB.\nNow pixel [r, g, b] has the correct values.\nAlbumentations and torchvision both expect RGB."]
+
+    BGR2RGB --> PARSE["Filename parsing\nos.path.basename → 'red_diamond_1_solid_aug_0042.jpg'\n.split('_') → ['red', 'diamond', '1', 'solid', 'aug', '0042.jpg']\n\nparts[0] = 'red'\nparts[1] = 'diamond'\nparts[2] = '1'\nparts[3] = 'solid'  ← .split('.')[0] drops the extension\n                       (or the aug suffix if it were here)"]
+
+    PARSE --> MAP["LABEL_MAPS lookup\n\n'red'     → LABEL_MAPS['color']['red']     = 0\n'diamond' → LABEL_MAPS['shape']['diamond'] = 0\n'1'       → LABEL_MAPS['number']['1']      = 0\n'solid'   → LABEL_MAPS['shading']['solid'] = 0\n\nEach integer wrapped in torch.tensor(..., dtype=torch.long)\ntorch.long = 64-bit integer, required by CrossEntropyLoss"]
+
+    MAP --> LABELS["labels = {\n  'color':   tensor(0),\n  'shape':   tensor(0),\n  'number':  tensor(0),\n  'shading': tensor(0)\n}"]
+
+    BGR2RGB --> AUG["self.transform(image=rgb_array)\n\nPasses the numpy (H,W,3) array to\nthe Albumentations pipeline.\nReturns dict: {'image': result}"]
+
+    AUG --> TENSOR["augmented['image']\n→ torch.Tensor shape (3, H, W)\n   dtype float32\n   values roughly -2.0 to +2.5\n   (after normalization)"]
+
+    TENSOR --> RETURN["return image_tensor, labels\n\nA tuple of:\n  - torch.Tensor (3, H, W)\n  - dict of 4 scalar tensors"]
+    LABELS --> RETURN
+```
+
+---
+
+### 6.5 LABEL_MAPS — why integers, and why these specific values
+
+```python
+LABEL_MAPS = {
+    'color':   {'red': 0, 'green': 1, 'purple': 2},
+    'shape':   {'diamond': 0, 'squiggle': 1, 'oval': 2},
+    'number':  {'1': 0, '2': 1, '3': 2},
+    'shading': {'solid': 0, 'striped': 1, 'open': 2}
+}
+```
+
+**Why integers?** PyTorch's `CrossEntropyLoss` (and `F1Score` metrics) require integer class indices, not strings. The model outputs a vector of 3 logits per head — index 0 means "class 0", index 1 means "class 1", etc. The label must be one of those indices so the loss can compare them.
+
+**Why these specific integers?** The mapping is arbitrary — what matters is consistency. `red=0` just means "red is class zero in the color head." As long as every sample with a red card maps to `0`, and the model learns to output its highest logit at index `0` for red cards, the classifier is correct.
+
+**Why `dtype=torch.long`?** `CrossEntropyLoss` requires the target to be a 64-bit integer tensor (`torch.long`). If you pass a float or a 32-bit int, PyTorch will raise a runtime error. This is enforced at label creation time so the error surfaces early.
+
+---
+
+### 6.6 What a complete batch looks like — shapes at every stage
+
+```mermaid
+flowchart LR
+    S1["Single sample from __getitem__\n\nimage:  Tensor (3, H, W)\nlabels: {\n  color:   Tensor scalar\n  shape:   Tensor scalar\n  number:  Tensor scalar\n  shading: Tensor scalar\n}"]
+
+    S1 -->|"×32 samples\nDataLoader stacks"| BATCH["One batch (batch_size=32)\n\nimages:  Tensor (32, 3, H, W)\nlabels: {\n  color:   Tensor (32,)\n  shape:   Tensor (32,)\n  number:  Tensor (32,)\n  shading: Tensor (32,)\n}"]
+
+    BATCH -->|"→ ResNet18 backbone"| FEAT["Feature map\n(32, 512, 1, 1)\nafter Global Avg Pool"]
+
+    FEAT -->|"→ 4 linear heads"| OUT["Model output dict\n{\n  color:   Tensor (32, 3)  ← 3 logits per sample\n  shape:   Tensor (32, 3)\n  number:  Tensor (32, 3)\n  shading: Tensor (32, 3)\n}"]
+```
+
+The `(32, 3)` output means: for each of the 32 images in the batch, the model produced 3 raw scores (logits). The highest score is the predicted class. `CrossEntropyLoss` compares these logits against the integer label (e.g., `0` for red) to compute the loss.
+
+---
+
+### 6.7 Full picture — one training step from disk to loss
+
+```mermaid
+flowchart TD
+    DISK["data/augmented/\n~24,300 .jpg files on disk"]
+
+    DISK --> SETUP["DataModule.setup()\nDiscover files → 80/20 split → apply multiplier\nCreate train Dataset + val Dataset"]
+
+    SETUP --> EPOCH["Start of epoch\nDataLoader shuffles training indices"]
+
+    EPOCH --> WORKERS["4 parallel worker processes\nEach worker calls __getitem__ independently"]
+
+    WORKERS --> GETITEM["__getitem__(idx) — per sample:\n1. cv2.imread → BGR numpy\n2. BGR → RGB\n3. filename.split('_') → label integers\n4. transform(image=array) → Tensor (3,H,W)\n5. return (tensor, labels_dict)"]
+
+    GETITEM --> COLLATE["DataLoader collation\nStack 32 samples:\nimages → (32,3,H,W)\nlabels → 4× (32,) tensors"]
+
+    COLLATE --> FORWARD["model.training_step(batch)\nForward pass through ResNet18\nOutput: 4 × (32,3) logit tensors"]
+
+    FORWARD --> LOSS["Combined loss\nloss = CrossEntropy(color_logits, color_labels)\n     + CrossEntropy(shape_logits, shape_labels)\n     + CrossEntropy(number_logits, number_labels)\n     + CrossEntropy(shading_logits, shading_labels)"]
+
+    LOSS --> BACK["loss.backward()\nAdamW.step()\nWeights updated"]
+
+    BACK --> NEXT["Next batch →\nrepeat until epoch ends"]
+
+    NEXT --> VAL["Validation\nSame flow, but:\n- No shuffle\n- get_val_transforms() only\n- No weight updates"]
 ```
 
 ---
