@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import pytorch_lightning as pl
 import torchvision.models as models
 
@@ -42,9 +43,15 @@ class MultiHeadResNet(pl.LightningModule):
             pre-trained backbone weights. After freeze_epochs the full network
             is fine-tuned end-to-end with a much lower learning rate.
             Set to 0 to disable freezing entirely.
+        lr: Peak learning rate for AdamW and OneCycleLR. The scheduler ramps
+            up to this value then decays. 3e-4 is the standard starting point
+            for fine-tuning pretrained ResNets with AdamW.
+        weight_decay: L2 regularization strength for AdamW. 1e-2 is the
+            value recommended in the AdamW paper and prevents overfitting
+            when the training set is small (as it is here).
     """
 
-    def __init__(self, freeze_epochs: int = 5):
+    def __init__(self, freeze_epochs: int = 5, lr: float = 3e-4, weight_decay: float = 1e-2):
         super().__init__()
 
         # Saves freeze_epochs to self.hparams and to the checkpoint file,
@@ -159,3 +166,115 @@ class MultiHeadResNet(pl.LightningModule):
         # Using a dict return (not a tuple) makes downstream code — loss
         # computation, metric logging, inference — self-documenting.
         return {name: head(features) for name, head in self.heads.items()}
+
+    # ------------------------------------------------------------------
+    # Training and validation steps
+    # ------------------------------------------------------------------
+
+    def training_step(self, batch, batch_idx):
+        """Computes combined cross-entropy loss across all four feature heads.
+
+        The total loss is the unweighted sum of four independent CrossEntropyLoss
+        terms — one per Set card feature. Summing (rather than averaging) means
+        the gradient signal is proportional to the number of tasks, which works
+        well when all four tasks have the same difficulty and class count (3).
+
+        Args:
+            batch: Tuple of (images, labels) from SetCardDataset:
+                - images: float32 tensor of shape (B, 3, 224, 224), ImageNet-normalized
+                - labels: dict mapping each feature name to a (B,) long tensor of class indices
+            batch_idx: Integer index of the current batch (used by Lightning internally).
+
+        Returns:
+            torch.Tensor: Scalar total loss for this batch. Lightning uses the
+                returned value to call .backward() and update parameters.
+        """
+        images, labels = batch
+        logits = self(images)  # dict[str, (B, 3)] — raw logits per feature head
+
+        losses = {
+            name: F.cross_entropy(logits[name], labels[name])
+            for name in FEATURE_NAMES
+        }
+        total_loss = sum(losses.values())
+
+        # Log total loss on both step and epoch so the progress bar shows
+        # live per-step updates while TensorBoard shows smooth epoch curves.
+        self.log('train_loss', total_loss, on_step=True, on_epoch=True, prog_bar=True)
+        for name, loss in losses.items():
+            self.log(f'train_loss_{name}', loss, on_epoch=True)
+
+        return total_loss
+
+    def validation_step(self, batch, batch_idx):
+        """Computes combined validation loss across all four feature heads.
+
+        Identical loss logic to training_step, but no augmentation is applied
+        to the inputs (val pipeline uses only resize + normalize). Logging with
+        on_epoch=True only — no per-step logging for validation, as the full
+        validation set is small enough that epoch averages are meaningful.
+
+        Args:
+            batch: Tuple of (images, labels) — same structure as training_step.
+            batch_idx: Integer index of the current batch.
+        """
+        images, labels = batch
+        logits = self(images)
+
+        losses = {
+            name: F.cross_entropy(logits[name], labels[name])
+            for name in FEATURE_NAMES
+        }
+        total_loss = sum(losses.values())
+
+        self.log('val_loss', total_loss, on_epoch=True, prog_bar=True)
+        for name, loss in losses.items():
+            self.log(f'val_loss_{name}', loss, on_epoch=True)
+
+    # ------------------------------------------------------------------
+    # Optimizer and scheduler
+    # ------------------------------------------------------------------
+
+    def configure_optimizers(self):
+        """Configures AdamW optimizer with a OneCycleLR learning rate schedule.
+
+        Optimizer — AdamW:
+            AdamW decouples weight decay from the gradient update step, which
+            prevents the decay from interacting with the adaptive learning rates
+            per parameter. This makes it strictly better than vanilla Adam for
+            fine-tuning pretrained networks. lr=3e-4 is a well-established
+            default for fine-tuning ResNets; weight_decay=1e-2 is the AdamW
+            paper's recommended default.
+
+        Scheduler — OneCycleLR:
+            Ramps the learning rate from ~lr/25 up to max_lr over the first
+            30% of training, then decays it to ~lr/1e4 for the remainder.
+            This "super-convergence" profile is particularly effective for
+            short training runs (e.g., 20–30 epochs on Colab) because it
+            aggressively explores the loss landscape early, then refines.
+
+            total_steps=self.trainer.estimated_stepping_batches lets Lightning
+            automatically account for max_epochs, dataset size, batch size, and
+            gradient accumulation — no manual step-count arithmetic needed.
+
+            interval='step' is mandatory: OneCycleLR must advance once per
+            optimizer step (batch), not once per epoch.
+
+        Returns:
+            dict with 'optimizer' and 'lr_scheduler' keys in the format
+            Lightning expects for step-level scheduler updates.
+        """
+        optimizer = torch.optim.AdamW(
+            self.parameters(),
+            lr=self.hparams.lr,
+            weight_decay=self.hparams.weight_decay,
+        )
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=self.hparams.lr,
+            total_steps=self.trainer.estimated_stepping_batches,
+        )
+        return {
+            'optimizer': optimizer,
+            'lr_scheduler': {'scheduler': scheduler, 'interval': 'step'},
+        }
