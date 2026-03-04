@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 import torchvision.models as models
+from torchmetrics.classification import MulticlassF1Score
+from src.utils.metrics import PerfectMatchAccuracy
 
 
 # The four features of a Set card, in the same order used by LABEL_MAPS
@@ -86,6 +88,17 @@ class MultiHeadResNet(pl.LightningModule):
             name: nn.Linear(512, NUM_CLASSES)
             for name in FEATURE_NAMES
         })
+
+        # --- Validation metrics ---
+        # Registered as nn.Modules so Lightning automatically moves them to
+        # the correct device (CPU / GPU / MPS) alongside the model weights.
+        # val_f1: one macro-averaged MulticlassF1Score per feature head.
+        # val_pma: custom metric — correct only if all 4 features match.
+        self.val_f1 = nn.ModuleDict({
+            name: MulticlassF1Score(num_classes=NUM_CLASSES, average='macro')
+            for name in FEATURE_NAMES
+        })
+        self.val_pma = PerfectMatchAccuracy()
 
         # Freeze the backbone at initialisation so the first freeze_epochs
         # epochs only train the four heads. This is a standard transfer
@@ -207,12 +220,15 @@ class MultiHeadResNet(pl.LightningModule):
         return total_loss
 
     def validation_step(self, batch, batch_idx):
-        """Computes combined validation loss across all four feature heads.
+        """Computes validation loss and evaluation metrics across all four heads.
 
-        Identical loss logic to training_step, but no augmentation is applied
-        to the inputs (val pipeline uses only resize + normalize). Logging with
-        on_epoch=True only — no per-step logging for validation, as the full
-        validation set is small enough that epoch averages are meaningful.
+        No augmentation is applied to validation inputs (val pipeline uses only
+        resize + normalize), making the metrics comparable across epochs.
+
+        Logs per-epoch:
+            val_loss, val_loss_{feature}  — combined and per-feature CE loss
+            val_f1_{feature}              — macro F1 per feature head
+            val_pma                       — Perfect Match Accuracy (all 4 correct)
 
         Args:
             batch: Tuple of (images, labels) — same structure as training_step.
@@ -221,15 +237,28 @@ class MultiHeadResNet(pl.LightningModule):
         images, labels = batch
         logits = self(images)
 
+        # Loss
         losses = {
             name: F.cross_entropy(logits[name], labels[name])
             for name in FEATURE_NAMES
         }
         total_loss = sum(losses.values())
-
         self.log('val_loss', total_loss, on_epoch=True, prog_bar=True)
         for name, loss in losses.items():
             self.log(f'val_loss_{name}', loss, on_epoch=True)
+
+        # Predicted class index for each feature: argmax over the 3 logits
+        preds = {name: logits[name].argmax(dim=1) for name in FEATURE_NAMES}
+
+        # Per-feature macro F1 — torchmetrics accumulates across batches and
+        # calls .compute() automatically when Lightning reads the metric at epoch end.
+        for name in FEATURE_NAMES:
+            self.val_f1[name].update(preds[name], labels[name])
+            self.log(f'val_f1_{name}', self.val_f1[name], on_epoch=True)
+
+        # Perfect Match Accuracy — 1.0 only if all 4 features are correct
+        self.val_pma.update(preds, labels)
+        self.log('val_pma', self.val_pma, on_epoch=True, prog_bar=True)
 
     # ------------------------------------------------------------------
     # Optimizer and scheduler

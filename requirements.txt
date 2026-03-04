@@ -1,6 +1,7 @@
 torch
 torchvision
 pytorch-lightning
+torchmetrics
 albumentations
 opencv-python-headless
 numpy
