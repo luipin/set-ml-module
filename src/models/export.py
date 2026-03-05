@@ -25,17 +25,17 @@ class _ExportableModel(nn.Module):
         return {name: head(features) for name, head in self.heads.items()}
 
 
-def export_torchscript(
+def export_model(
     model: MultiHeadResNet,
-    output_path: str = "model.pt",
+    output_path: str = "model.pt2",
     example_input: torch.Tensor | None = None,
 ) -> torch.export.ExportedProgram:
     """Exports a trained MultiHeadResNet using ``torch.export`` for deployment.
 
-    ``torch.export`` is the modern, stable replacement for ``torch.jit.trace``
-    (deprecated in Python 3.14+). The exported ``ExportedProgram`` captures the
-    full computation graph and can be saved to disk and reloaded without
-    PyTorch Lightning installed.
+    Uses ``torch.export`` (introduced in PyTorch 2.0), the modern graph-capture
+    API that supersedes the older ``torch.jit.trace`` / TorchScript approach.
+    The exported ``.pt2`` file can be reloaded without PyTorch Lightning
+    installed, making it suitable for standalone inference services.
 
     The Lightning-specific layers (metrics, trainer hooks) are excluded from
     the export by wrapping only the backbone and heads in a plain ``nn.Module``
@@ -45,9 +45,10 @@ def export_torchscript(
         model: A trained ``MultiHeadResNet`` instance. The model is moved to
             eval mode before export so batch normalisation layers behave
             correctly at inference time.
-        output_path: Destination path for the exported ``.pt`` file. Parent
-            directories are created automatically. Defaults to ``"model.pt"``
-            in the current working directory.
+        output_path: Destination path for the exported ``.pt2`` file. Parent
+            directories are created automatically. If a ``.pt`` suffix is
+            given it is silently changed to ``.pt2`` (the format required by
+            ``torch.export.save``). Defaults to ``"model.pt2"``.
         example_input: A float32 tensor of shape ``(B, 3, 224, 224)`` used to
             trace the computation graph. If ``None``, a single zero tensor
             ``(1, 3, 224, 224)`` is created on the same device as the model.
@@ -64,10 +65,10 @@ def export_torchscript(
     Example — exporting::
 
         from src.models.multi_head_resnet import MultiHeadResNet
-        from src.models.export import export_torchscript
+        from src.models.export import export_model
 
         model = MultiHeadResNet.load_from_checkpoint("checkpoints/best.ckpt")
-        export_torchscript(model, output_path="checkpoints/model.pt")
+        export_model(model, output_path="checkpoints/model.pt2")
 
     Example — loading and running the exported model (no Lightning required)::
 
