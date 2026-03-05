@@ -16,6 +16,12 @@ LABEL_MAPS = {
     'shading': {'solid': 0, 'striped': 1, 'open': 2}
 }
 
+# Filename aliases: some seed images use alternative spellings that map to a
+# canonical label. e.g. 'empty' and 'open' refer to the same Set card shading.
+_LABEL_ALIASES = {
+    'shading': {'empty': 'open'},
+}
+
 class SetCardDataset(Dataset):
     """
     Custom PyTorch Dataset for Set Cards.
@@ -70,10 +76,12 @@ class SetCardDataset(Dataset):
             )
 
         try:
-            color_str = parts[0].lower()
-            shape_str = parts[1].lower()
-            number_str = parts[2].lower()
-            shading_str = parts[3].split('.')[0].lower() # Drop extension or suffix
+            color_str   = parts[0].lower()
+            shape_str   = parts[1].lower()
+            number_str  = parts[2].lower()
+            shading_str = parts[3].split('.')[0].lower()  # Drop extension or suffix
+            # Normalise any filename alias to the canonical label name
+            shading_str = _LABEL_ALIASES['shading'].get(shading_str, shading_str)
 
             labels = {
                 'color': torch.tensor(LABEL_MAPS['color'][color_str], dtype=torch.long),
