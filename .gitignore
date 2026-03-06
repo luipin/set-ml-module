@@ -25,7 +25,7 @@ logs/
 *.ckpt
 *.pth
 *.pt
-*.pt2
+*.pt2  # legacy torch.export format, superseded by *.pt (TorchScript)
 
 # Notebooks
 .ipynb_checkpoints/

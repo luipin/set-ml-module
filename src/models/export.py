@@ -27,40 +27,41 @@ class _ExportableModel(nn.Module):
 
 def export_model(
     model: MultiHeadResNet,
-    output_path: str = "model.pt2",
+    output_path: str = "checkpoints/model.pt",
     example_input: torch.Tensor | None = None,
-) -> torch.export.ExportedProgram:
-    """Exports a trained MultiHeadResNet using ``torch.export`` for deployment.
+) -> torch.jit.ScriptModule:
+    """Exports a trained MultiHeadResNet as a TorchScript traced model.
 
-    Uses ``torch.export`` (introduced in PyTorch 2.0), the modern graph-capture
-    API that supersedes the older ``torch.jit.trace`` / TorchScript approach.
-    The exported ``.pt2`` file can be reloaded without PyTorch Lightning
-    installed, making it suitable for standalone inference services.
+    Uses ``torch.jit.trace`` to capture the computation graph (backbone + all
+    four classification heads) into a self-contained ``.pt`` file that can be
+    loaded and run without PyTorch Lightning installed.
+
+    TorchScript is chosen over ``torch.export`` because it handles dynamic
+    batch sizes reliably out of the box. ``torch.export`` bakes the example
+    input's batch size as a static shape guard, causing ``AssertionError``
+    at inference time whenever the batch size differs — a limitation that
+    cannot be worked around consistently across PyTorch versions.
 
     The Lightning-specific layers (metrics, trainer hooks) are excluded from
-    the export by wrapping only the backbone and heads in a plain ``nn.Module``
-    before exporting. The exported model is therefore lighter and more portable.
+    the trace by wrapping only the backbone and heads in a plain ``nn.Module``
+    before tracing.
 
     Args:
-        model: A trained ``MultiHeadResNet`` instance. The model is moved to
-            eval mode before export so batch normalisation layers behave
-            correctly at inference time.
-        output_path: Destination path for the exported ``.pt2`` file. Parent
-            directories are created automatically. If a ``.pt`` suffix is
-            given it is silently changed to ``.pt2`` (the format required by
-            ``torch.export.save``). Defaults to ``"model.pt2"``.
+        model: A trained ``MultiHeadResNet`` instance. Moved to eval mode
+            before tracing so batch normalisation layers use running statistics.
+        output_path: Destination path for the ``.pt`` file. Parent directories
+            are created automatically. Defaults to ``"checkpoints/model.pt"``.
         example_input: A float32 tensor of shape ``(B, 3, 224, 224)`` used to
             trace the computation graph. If ``None``, a single zero tensor
-            ``(1, 3, 224, 224)`` is created on the same device as the model.
-            Defaults to ``None``.
+            ``(1, 3, 224, 224)`` is used. Any batch size works — TorchScript
+            traces are batch-size agnostic. Defaults to ``None``.
 
     Returns:
-        torch.export.ExportedProgram: The exported program. It can be used
-        immediately for inference or reloaded later with ``torch.export.load()``.
+        torch.jit.ScriptModule: The traced module, usable immediately for
+        inference and reloadable with ``torch.jit.load()``.
 
     Raises:
-        ValueError: If ``example_input`` is provided but does not have shape
-            ``(B, 3, 224, 224)``.
+        ValueError: If ``example_input`` does not have shape ``(B, 3, 224, 224)``.
 
     Example — exporting::
 
@@ -68,21 +69,20 @@ def export_model(
         from src.models.export import export_model
 
         model = MultiHeadResNet.load_from_checkpoint("checkpoints/best.ckpt")
-        export_model(model, output_path="checkpoints/model.pt2")
+        export_model(model, output_path="checkpoints/model.pt")
 
-    Example — loading and running the exported model (no Lightning required)::
+    Example — loading and running (no Lightning required)::
 
         import torch
 
-        ep = torch.export.load("checkpoints/model.pt")
-        inference_model = ep.module()
-        inference_model.eval()
+        model = torch.jit.load("checkpoints/model.pt")
+        model.eval()
 
-        image = torch.randn(1, 3, 224, 224)  # preprocessed card image
+        image = torch.randn(4, 3, 224, 224)  # batch of 4 preprocessed cards
         with torch.no_grad():
-            logits = inference_model(image)
-        # logits is a dict: {"color": Tensor(1,3), "shape": ..., ...}
-        color_class = logits["color"].argmax(dim=1).item()
+            logits = model(image)
+        # logits: {"color": Tensor(4,3), "shape": Tensor(4,3), ...}
+        color_classes = logits["color"].argmax(dim=1).tolist()
     """
     if example_input is not None:
         if example_input.ndim != 4 or example_input.shape[1] != 3:
@@ -100,24 +100,14 @@ def export_model(
     exportable = _ExportableModel(model.backbone, model.heads)
     exportable.eval()
 
-    # Declare the batch dimension as dynamic so the exported model accepts any
-    # batch size at inference time, not just the size of example_input (1).
-    # Without this, torch.export bakes a concrete shape guard (batch == 1)
-    # into the graph, causing an AssertionError for any other batch size.
-    #
-    # Dim.AUTO lets torch.export infer the correct dynamism automatically.
-    # Using a named Dim with min=1 raises an error when torch.export detects
-    # that the model internally specializes the batch dimension to a constant.
-    dynamic_shapes = {"x": {0: torch.export.Dim.AUTO}}
-
+    # torch.jit.trace records ops for the given example but does not bake
+    # the batch size as a concrete constant — the traced graph works for
+    # any batch size at inference time.
     with torch.no_grad():
-        ep = torch.export.export(exportable, (example_input,), dynamic_shapes=dynamic_shapes)
+        traced = torch.jit.trace(exportable, example_input)
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    # torch.export uses the .pt2 format; rename silently if the caller passed .pt
-    if output_path.suffix == ".pt":
-        output_path = output_path.with_suffix(".pt2")
-    torch.export.save(ep, str(output_path))
+    torch.jit.save(traced, str(output_path))
 
-    return ep
+    return traced
