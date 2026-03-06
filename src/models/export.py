@@ -106,7 +106,9 @@ def export_model(
     with torch.no_grad():
         traced = torch.jit.trace(exportable, example_input)
 
-    output_path = Path(output_path)
+    # Resolve to absolute path immediately so the save location is unambiguous
+    # regardless of the caller's working directory.
+    output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     torch.jit.save(traced, str(output_path))
 
