@@ -13,6 +13,7 @@ ehthumbs.db
 Thumbs.db
 
 # Virtual Environments
+.venv/
 venv/
 ENV/
 .env/
@@ -20,9 +21,11 @@ ENV/
 # ML/Data
 data/augmented/
 checkpoints/
+logs/
 *.ckpt
 *.pth
 *.pt
+*.pt2
 
 # Notebooks
 .ipynb_checkpoints/
