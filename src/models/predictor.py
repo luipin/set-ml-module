@@ -60,30 +60,9 @@ def predict(model: MultiHeadResNet, image) -> dict:
         print(result["color"]["prediction"])   # "red"
         print(result["color"]["confidence"])   # 0.9734
     """
-    # --- 1. Load image as an HxWx3 RGB numpy array ---
-    if isinstance(image, (str, Path)):
-        path = str(image)
-        if not Path(path).exists():
-            raise FileNotFoundError(f"Image file not found: {path}")
-        img_bgr = cv2.imread(path)
-        if img_bgr is None:
-            raise ValueError(f"OpenCV could not decode image at: {path}")
-        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    elif isinstance(image, np.ndarray):
-        if image.ndim != 3 or image.shape[2] != 3:
-            raise ValueError(
-                f"Expected a 3-channel HxWx3 array, got shape {image.shape}."
-            )
-        img_rgb = image
-    else:
-        raise ValueError(
-            f"Unsupported image type: {type(image)}. "
-            "Pass a file path (str/Path) or a numpy HxWx3 RGB array."
-        )
-
-    # --- 2. Preprocess (same pipeline as validation) ---
+    # --- 1. Load and preprocess ---
     transform = get_val_transforms()
-    tensor = transform(image=img_rgb)["image"]  # shape: (3, 224, 224)
+    tensor = transform(image=_load_image(image))["image"]  # shape: (3, 224, 224)
     batch = tensor.unsqueeze(0)  # shape: (1, 3, 224, 224)
 
     # --- 3. Inference ---
@@ -107,3 +86,103 @@ def predict(model: MultiHeadResNet, image) -> dict:
         }
 
     return result
+
+
+def _load_image(image) -> np.ndarray:
+    """Loads and validates a single image into an HxWx3 RGB numpy array.
+
+    Args:
+        image: A file path (str/Path) or an HxWx3 numpy array.
+
+    Returns:
+        HxWx3 RGB uint8 numpy array.
+
+    Raises:
+        FileNotFoundError: If the path does not exist.
+        ValueError: If the image cannot be decoded or has wrong shape.
+    """
+    if isinstance(image, (str, Path)):
+        path = str(image)
+        if not Path(path).exists():
+            raise FileNotFoundError(f"Image file not found: {path}")
+        img_bgr = cv2.imread(path)
+        if img_bgr is None:
+            raise ValueError(f"OpenCV could not decode image at: {path}")
+        return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    elif isinstance(image, np.ndarray):
+        if image.ndim != 3 or image.shape[2] != 3:
+            raise ValueError(
+                f"Expected a 3-channel HxWx3 array, got shape {image.shape}."
+            )
+        return image
+    else:
+        raise ValueError(
+            f"Unsupported image type: {type(image)}. "
+            "Pass a file path (str/Path) or a numpy HxWx3 RGB array."
+        )
+
+
+def predict_batch(model: MultiHeadResNet, images: list) -> list[dict]:
+    """Runs inference on a batch of Set card images in a single forward pass.
+
+    More efficient than calling ``predict()`` in a loop because all images
+    share one GPU/CPU kernel launch and one matrix multiplication per head.
+    The speedup is most pronounced on GPU where kernel launch overhead
+    dominates single-image latency.
+
+    Args:
+        model: A trained ``MultiHeadResNet`` instance.
+        images: A list of images. Each element may be a file path (str/Path)
+            or an HxWx3 RGB numpy array — the same formats accepted by
+            ``predict()``.
+
+    Returns:
+        A list of prediction dicts, one per input image, in the same order as
+        ``images``. Each dict has the same structure as ``predict()``::
+
+            [
+                {"color": {"prediction": "red", "confidence": 0.97}, ...},
+                {"color": {"prediction": "green", "confidence": 0.91}, ...},
+            ]
+
+    Raises:
+        ValueError: If ``images`` is empty.
+        FileNotFoundError: If any path in ``images`` does not exist.
+
+    Example::
+
+        paths = glob.glob("data/raw/*.jpg")
+        results = predict_batch(model, paths)
+        for path, result in zip(paths, results):
+            print(path, result["color"]["prediction"])
+    """
+    if not images:
+        raise ValueError("images list must not be empty.")
+
+    transform = get_val_transforms()
+    device = next(model.parameters()).device
+
+    # Preprocess all images and stack into a single (B, 3, 224, 224) tensor.
+    tensors = [transform(image=_load_image(img))["image"] for img in images]
+    batch = torch.stack(tensors).to(device)  # (B, 3, 224, 224)
+
+    model.eval()
+    with torch.no_grad():
+        logits = model(batch)  # dict[str, Tensor(B, 3)]
+
+    # Unpack batch dimension: produce one result dict per image.
+    B = batch.shape[0]
+    results = []
+    for i in range(B):
+        result = {}
+        for feature in FEATURE_NAMES:
+            probs = F.softmax(logits[feature][i], dim=0)  # (3,)
+            confidence, class_idx = probs.max(dim=0)
+            label = INVERSE_LABEL_MAPS[feature][class_idx.item()]
+            result[feature] = {
+                "prediction": label,
+                "confidence": round(confidence.item(), 4),
+            }
+        results.append(result)
+
+    return results
