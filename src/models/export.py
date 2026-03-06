@@ -100,8 +100,18 @@ def export_model(
     exportable = _ExportableModel(model.backbone, model.heads)
     exportable.eval()
 
+    # Declare the batch dimension as dynamic so the exported model accepts any
+    # batch size at inference time, not just the size of example_input (1).
+    # Without this, torch.export bakes a concrete shape guard (batch == 1)
+    # into the graph, causing an AssertionError for any other batch size.
+    #
+    # Dim.AUTO lets torch.export infer the correct dynamism automatically.
+    # Using a named Dim with min=1 raises an error when torch.export detects
+    # that the model internally specializes the batch dimension to a constant.
+    dynamic_shapes = {"x": {0: torch.export.Dim.AUTO}}
+
     with torch.no_grad():
-        ep = torch.export.export(exportable, (example_input,))
+        ep = torch.export.export(exportable, (example_input,), dynamic_shapes=dynamic_shapes)
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
