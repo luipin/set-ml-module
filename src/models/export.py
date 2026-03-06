@@ -103,8 +103,10 @@ def export_model(
     # torch.jit.trace records ops for the given example but does not bake
     # the batch size as a concrete constant — the traced graph works for
     # any batch size at inference time.
+    # strict=False is required because the model returns a dict. The structure
+    # is fixed (always the same 4 keys), so this is safe.
     with torch.no_grad():
-        traced = torch.jit.trace(exportable, example_input)
+        traced = torch.jit.trace(exportable, example_input, strict=False)
 
     # Resolve to absolute path immediately so the save location is unambiguous
     # regardless of the caller's working directory.
