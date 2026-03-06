@@ -22,32 +22,51 @@ Instead of training four separate neural networks or a massive 81-class classifi
 
 ## Folder Structure
 
-The project is structured to separate data pipelines, model architecture, and interactive exploration (Jupyter Notebooks).
-
 ```text
 set-ml-module/
-├── checkpoints/                # Saved model weights (TorchScript models)
-├── data/                       # Dataset directories (ignored by git)
-│   ├── raw/                    # The 81 original seed images (e.g., red_diamond_1_solid.jpg)
-│   └── augmented/              # The bootstrapped dataset (16,000 - 40,000 images)
-├── notebooks/                  # Interactive experimentation
-│   ├── 01-data-exploration.ipynb      # For visualizing augmentations
-│   └── set_card_classifier_main.ipynb # Full training and evaluation notebook (Deliverable)
-├── src/                        # Source code package
+├── checkpoints/                        # Trained model artifacts (git-ignored)
+│   ├── best-epoch=XX-val_pma=Y.ckpt   # PyTorch Lightning checkpoint (training artifact)
+│   └── model.pt                        # TorchScript export (deployment artifact)
+├── data/                               # Datasets (git-ignored)
+│   ├── raw/                            # 81 seed images — {color}_{shape}_{number}_{shading}.jpg
+│   └── augmented/                      # Bootstrapped dataset (16k–40k images)
+├── doc/                                # Architecture and design notes
+│   ├── augmentation-pipeline.md
+│   ├── multi-head-resnet-training.md
+│   └── offline-vs-online-augmentation.md
+├── logs/                               # CSVLogger training metrics (git-ignored)
+├── notebooks/                          # Jupyter notebooks
+│   ├── set_card_classifier_main.ipynb  # End-to-end: data → train → evaluate → export
+│   ├── inference.ipynb                 # Inference with the .ckpt checkpoint
+│   ├── pt2_deployment.ipynb            # Deployment demo using the TorchScript .pt export
+│   ├── 01-data-exploration.ipynb       # Dataset exploration and augmentation visualisation
+│   └── 02-background-augmentation-test.ipynb
+├── scripts/
+│   └── generate_notebook.py            # Utility to scaffold notebook cells
+├── src/                                # Source package
 │   ├── data/
-│   │   ├── bootstrap_dataset.py       # Script to generate augmented images offline
-│   │   └── set_card_data_pipeline.py  # PyTorch LightningDataModule and Dataset
+│   │   ├── set_card_data_pipeline.py   # SetCardDataset + SetCardDataModule (LightningDataModule)
+│   │   └── bootstrap_dataset.py        # Offline augmentation script (generates data/augmented/)
 │   ├── models/
-│   │   └── multi_head_resnet.py       # The PyTorch LightningModule (Multi-Task CNN)
+│   │   ├── multi_head_resnet.py        # MultiHeadResNet (LightningModule) — backbone + 4 heads
+│   │   ├── predictor.py                # predict() and predict_batch() inference helpers
+│   │   └── export.py                   # export_model() — TorchScript export via torch.jit.trace
 │   └── utils/
-│       ├── augmentations.py           # Albumentations transform pipelines
-│       └── metrics.py                 # Custom metrics (F1, Perfect Match Accuracy)
-├── tests/                      # Unit tests for the pipeline and model
+│       ├── augmentations.py            # Albumentations train/val transform pipelines
+│       ├── metrics.py                  # PerfectMatchAccuracy + per-feature F1
+│       └── visualizer.py              # visualize_predictions() grid display
+├── tests/                              # Unit tests
 │   ├── test_data_pipeline.py
-│   └── test_model_architecture.py
-├── requirements.txt            # Python dependencies
-└── set-card-classifier-spec.md # The original project specification document
+│   ├── test_model_architecture.py
+│   ├── test_predictor.py
+│   ├── test_export.py
+│   └── test_visualizer.py
+├── .venv/                              # Virtual environment (git-ignored)
+├── requirements.txt                    # Python dependencies
+└── set-card-classifier-spec.md         # Original project specification
 ```
+
+> **Checkpoint formats:** `checkpoints/best-*.ckpt` is the training checkpoint — it stores weights, optimizer state, and hyperparameters and can resume training. `checkpoints/model.pt` is the TorchScript deployment artifact — it has no Lightning dependency, is ~43 MB, and accepts any batch size.
 
 ---
 
@@ -59,9 +78,10 @@ set-ml-module/
    cd set-ml-module
    ```
 
-2. **Install dependencies:**
-   It is recommended to use a virtual environment (e.g., `venv` or `conda`).
+2. **Create a virtual environment and install dependencies:**
    ```bash
+   python -m venv .venv
+   source .venv/bin/activate   # Windows: .venv\Scripts\activate
    pip install -r requirements.txt
    ```
 
