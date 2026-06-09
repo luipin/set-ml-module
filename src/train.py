@@ -130,10 +130,11 @@ def main():
         print(f"\nConfiguration Error: {e}", file=sys.stderr)
         sys.exit(1)
         
-    # Resolve CPU workers (optimally 4-8 threads for Apple Silicon to prevent scheduler thrashing)
+    # Resolve CPU workers. On macOS, default to 0 to prevent torch_shm_manager
+    # shared memory socket errors (common due to sandboxing and OS-level limitations).
     num_workers = args.num_workers
     if num_workers is None:
-        num_workers = min(8, os.cpu_count() or 4)
+        num_workers = 0 if sys.platform == "darwin" else min(8, os.cpu_count() or 4)
         
     # Print hardware and run information
     print("==================================================")
