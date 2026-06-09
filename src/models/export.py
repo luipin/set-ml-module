@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from pathlib import Path
+from typing import Optional
 
 from src.models.multi_head_resnet import MultiHeadResNet, FEATURE_NAMES
 
@@ -28,7 +29,7 @@ class _ExportableModel(nn.Module):
 def export_model(
     model: MultiHeadResNet,
     output_path: str = "checkpoints/model.pt",
-    example_input: torch.Tensor | None = None,
+    example_input: Optional[torch.Tensor] = None,
 ) -> torch.jit.ScriptModule:
     """Exports a trained MultiHeadResNet as a TorchScript traced model.
 

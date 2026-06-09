@@ -30,47 +30,46 @@ def tmp_pt(tmp_path):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
-
 class TestExportTorchscript:
-    def test_returns_exported_program(self, model, tmp_pt):
+    def test_returns_traced_model(self, model, tmp_pt):
         result = export_model(model, output_path=str(tmp_pt))
-        assert isinstance(result, torch.export.ExportedProgram)
+        assert isinstance(result, torch.jit.ScriptModule)
 
     def test_file_is_created(self, model, tmp_pt):
         export_model(model, output_path=str(tmp_pt))
         assert tmp_pt.exists()
 
     def test_parent_dirs_created(self, model, tmp_path):
-        nested = tmp_path / "a" / "b" / "model.pt2"
+        nested = tmp_path / "a" / "b" / "model.pt"
         export_model(model, output_path=str(nested))
         assert nested.exists()
 
-    def test_exported_program_is_loadable(self, model, tmp_pt):
+    def test_exported_model_is_loadable(self, model, tmp_pt):
         export_model(model, output_path=str(tmp_pt))
-        loaded = torch.export.load(str(tmp_pt))
-        assert isinstance(loaded, torch.export.ExportedProgram)
+        loaded = torch.jit.load(str(tmp_pt))
+        assert isinstance(loaded, torch.jit.ScriptModule)
 
     def test_loaded_model_output_shape(self, model, tmp_pt):
         export_model(model, output_path=str(tmp_pt))
-        ep = torch.export.load(str(tmp_pt))
+        ep = torch.jit.load(str(tmp_pt))
         x = torch.randn(1, 3, 224, 224)
         with torch.no_grad():
-            logits = ep.module()(x)
+            logits = ep(x)
         for feature in FEATURE_NAMES:
             assert logits[feature].shape == (1, 3)
 
     def test_loaded_model_has_all_features(self, model, tmp_pt):
         export_model(model, output_path=str(tmp_pt))
-        ep = torch.export.load(str(tmp_pt))
+        ep = torch.jit.load(str(tmp_pt))
         x = torch.randn(1, 3, 224, 224)
         with torch.no_grad():
-            logits = ep.module()(x)
+            logits = ep(x)
         assert set(logits.keys()) == set(FEATURE_NAMES)
 
     def test_accepts_custom_example_input(self, model, tmp_pt):
         example = torch.randn(1, 3, 224, 224)
         result = export_model(model, output_path=str(tmp_pt), example_input=example)
-        assert isinstance(result, torch.export.ExportedProgram)
+        assert isinstance(result, torch.jit.ScriptModule)
 
     def test_bad_example_input_shape_raises(self, model, tmp_pt):
         bad = torch.randn(1, 1, 224, 224)  # wrong channel count
@@ -84,9 +83,9 @@ class TestExportTorchscript:
             orig_logits = model(x)
 
         export_model(model, output_path=str(tmp_pt))
-        ep = torch.export.load(str(tmp_pt))
+        ep = torch.jit.load(str(tmp_pt))
         with torch.no_grad():
-            exported_logits = ep.module()(x)
+            exported_logits = ep(x)
 
         for feature in FEATURE_NAMES:
             assert torch.allclose(orig_logits[feature], exported_logits[feature])
