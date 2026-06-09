@@ -33,6 +33,7 @@ set-ml-module/
 ├── doc/                                # Architecture and design notes
 │   ├── augmentation-pipeline.md
 │   ├── multi-head-resnet-training.md
+│   ├── model-validation-and-testing.md
 │   └── offline-vs-online-augmentation.md
 ├── logs/                               # CSVLogger training metrics (git-ignored)
 ├── notebooks/                          # Jupyter notebooks
@@ -98,3 +99,13 @@ set-ml-module/
    python -m src.data.bootstrap_dataset --raw_dir data/raw --augmented_dir data/augmented --augmentations 300
    ```
    *Note: The `SetCardDataModule` also supports dynamic (on-the-fly) augmentation if you prefer not to save thousands of files to disk.*
+
+---
+
+## Documentation
+
+For more in-depth explanations of the system design and validation, see:
+* [Multi-Head ResNet Training Architecture](doc/multi-head-resnet-training.md)
+* [Data Augmentation Pipeline](doc/augmentation-pipeline.md)
+* [Offline vs Online Augmentation](doc/offline-vs-online-augmentation.md)
+* [Model Validation and Testing Report](doc/model-validation-and-testing.md)
